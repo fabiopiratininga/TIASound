@@ -18,12 +18,10 @@ A JavaScript library that emulates the sound capabilities of the Atari 2600's TI
 
 ## Playback Behavior
 
-The TIA chip (and this emulator) features two audio channels that play continuously once started. Unlike modern audio APIs:
-
-Sounds don't have a defined duration - they keep playing until modified
-Each channel can only play one sound at a time
-Changing parameters instantly affects the ongoing sound
-Set volume to 0 to silence a channel
+The TIA chip (and this emulator) features two audio channels that play continuously once started. Unlike modern audio APIs, sounds don't have a defined duration - they keep playing until modified.
+Each channel can only play one sound at a time.
+Changing parameters instantly affects the ongoing sound.
+Set volume to 0 to silence a channel.
 
 ## Quick Start
 
