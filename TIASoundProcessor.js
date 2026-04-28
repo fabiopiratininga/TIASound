@@ -1,24 +1,49 @@
 
 /*!
- * TIASoundProcessor 1.0
+ * TIASoundProcessor 2.0
  * Audio processor that emulates the Atari 2600's TIA sound chip.
- * Implements the core sound generation logic for producing authentic Atari-style audio waveforms.
+ * Implements the core sound generation logic using real LFSR (Linear Feedback
+ * Shift Register) models identical to the Atari 2600 TIA hardware, replacing
+ * the previous pre-computed run-length-encoded polynomial approximation.
  * https://github.com/fabiopiratininga/TIASound
- * 
+ *
+ * LFSR polynomials (Fibonacci form, right-shift, feedback inserted at MSB):
+ *   Poly4 — x^4 + x + 1,      taps at bits 1 and 0, period 15
+ *   Poly5 — x^5 + x^2 + 1,    taps at bits 2 and 0, period 31
+ *   Poly9 — x^9 + x^4 + 1,    taps at bits 4 and 0, period 511
+ *
+ * AUDC mode map (each tick = one AUDF+1 TIA-clock period):
+ *   0  SET        — output held at 1 (DC / silence)
+ *   1  POLY4      — clock poly4; output = poly4 LSB
+ *   2  POLY5→4    — clock poly5; clock poly4 only when poly5 LSB = 1; output = poly4 LSB
+ *   3  POLY5→4    — same as mode 2
+ *   4  TONE       — toggle tone flip-flop; output = flip-flop
+ *   5  TONE       — same as mode 4
+ *   6  POLY5→TONE — clock poly5; toggle tone only when poly5 LSB = 1; output = flip-flop
+ *   7  POLY5      — clock poly5; output = poly5 LSB
+ *   8  POLY9      — clock poly9; output = poly9 LSB  (white noise)
+ *   9  POLY5      — same as mode 7
+ *  10  POLY5→9    — clock poly5; clock poly9 only when poly5 LSB = 1; output = poly9 LSB
+ *  11  SET        — output held at 1 (DC / silence)
+ *  12  TONE       — same as mode 4
+ *  13  TONE       — same as mode 5
+ *  14  TONE ÷3    — extra ÷3 pre-divider, then toggle tone; output = flip-flop
+ *  15  POLY5 ÷3   — extra ÷3 pre-divider, then clock poly5; output = poly5 LSB
+ *
  * MIT License
- * 
+ *
  * Copyright (c) 2025 Fabio Cardoso
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -29,41 +54,38 @@
  */
 
 class TIASoundProcessor extends AudioWorkletProcessor {
-    
-    //Initializes audio parameters and sets up message handling
-    constructor(){
+
+    // Initializes audio parameters and sets up message handling
+    constructor() {
         super();
 
         // Sample rates
-        this.SAMPLE_RATE = 48000;      // Output sample rate
-        this.TIA_SAMPLE_RATE = 31440;  // TIA chip native rate
-        
-        // Initialize state and polynomials
+        this.SAMPLE_RATE = sampleRate;     // Output sample rate (AudioWorklet global)
+        this.TIA_SAMPLE_RATE = 31440;      // TIA chip native audio clock (NTSC: 3.579545 MHz / 114)
+
+        // Initialize LFSR state
         this.reset();
-        this.setPoly();
-        
+
         // TIA sound registers
-        this.AUDV = 0;  // Volume (0-15)
-        this.AUDC = 0;  // Control (0-15) 
-        this.AUDF = 0;  // Frequency (0-31)
-        
+        this.AUDV = 0;  // Volume  (0-15)
+        this.AUDC = 0;  // Control (0-15)
+        this.AUDF = 0;  // Frequency divisor (0-31)
+
         // Audio output buffer
         this.buffer = new Float32Array(128);
 
         // Handle incoming messages to update sound registers
         this.port.onmessage = (event) => {
-            // Reset internal state
+            // Reset internal state on every register update
             this.reset();
-            // Destructure the received register values
             const { AUDV, AUDC, AUDF } = event.data;
             // Update volume register (0-15)
             this.AUDV = this.clamp(AUDV, 0, 15);
             // Update control register (0-15)
-            this.AUDC = this.clamp(AUDC, 0, 15); 
+            this.AUDC = this.clamp(AUDC, 0, 15);
             // Update frequency register (0-31)
             this.AUDF = this.clamp(AUDF, 0, 31);
         };
-
     }
 
     // Clamps a value between a minimum and maximum
@@ -71,88 +93,149 @@ class TIASoundProcessor extends AudioWorkletProcessor {
         return Math.min(Math.max(value, min), max);
     }
 
-
-    // Sets up polynomial sequences and frequency divisors for TIA sound generation
-    setPoly(){
-        const p0 = [1, -1];
-        const p1 = [1, 1, -1];
-        const p2 = [16, 15, -1];
-        const p3 = [1, 2, 2, 1, 1, 1, 4, 3, -1];
-        const p4 = [1, 2, 1, 1, 2, 2, 5, 4, 2, 1, 3, 1, 1, 1, 1, 4, -1];
-        const p5 = [1, 4, 1, 3, 2, 4, 1, 2, 3, 2, 1, 1, 1, 1, 1, 1, 2, 4, 2, 1, 4, 1, 1, 2, 2, 1, 3, 2, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 2, 1, 1, 2, 6, 1, 2, 2, 1, 2, 1, 2, 1, 1, 2, 1, 6, 2, 1, 2, 2, 1, 1, 1, 1, 2, 2, 2, 2, 7, 2, 3, 2, 2, 1, 1, 1, 3, 2, 1, 1, 2, 1, 1, 7, 1, 1, 3, 1, 1, 2, 3, 3, 1, 1, 1, 2, 2, 1, 1, 2, 2, 4, 3, 5, 1, 3, 1, 1, 5, 2, 1, 1, 1, 2, 1, 2, 1, 3, 1, 2, 5, 1, 1, 2, 1, 1, 1, 5, 1, 1, 1, 1, 1, 1, 1, 1, 6, 1, 1, 1, 2, 1, 1, 1, 1, 4, 2, 1, 1, 3, 1, 3, 6, 3, 2, 3, 1, 1, 2, 1, 2, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 2, 1, 4, 2, 2, 3, 4, 1, 1, 4, 1, 2, 1, 2, 2, 2, 1, 1, 4, 3, 1, 4, 4, 9, 5, 4, 1, 5, 3, 1, 1, 3, 2, 2, 2, 1, 5, 1, 2, 1, 1, 1, 2, 3, 1, 2, 1, 1, 3, 4, 2, 5, 2, 2, 1, 2, 3, 1, 1, 1, 1, 1, 2, 1, 3, 3, 3, 2, 1, 2, 1, 1, 1, 1, 1, 3, 3, 1, 2, 2, 3, 1, 3, 1, 8, -1];
-        const p6 = [5, 6, 4, 5, 10, 5, 3, 7, 4, 10, 6, 3, 6, 4, 9, 6, -1];
-        const p7 = [2, 3, 2, 1, 4, 1, 6, 10, 2, 4, 2, 1, 1, 4, 5, 9, 3, 3, 4, 1, 1, 1, 8, 5, 5, 5, 4, 1, 1, 1, 8, 4, 2, 8, 3, 3, 1, 1, 7, 4, 2, 7, 5, 1, 3, 1, 7, 4, 1, 4, 8, 2, 1, 3, 4, 7, 1, 3, 7, 3, 2, 1, 6, 6, 2, 2, 4, 5, 3, 2, 6, 6, 1, 3, 3, 2, 5, 3, 7, 3, 4, 3, 2, 2, 2, 5, 9, 3, 1, 5, 3, 1, 2, 2, 11, 5, 1, 5, 3, 1, 1, 2, 12, 5, 1, 2, 5, 2, 1, 1, 12, 6, 1, 2, 5, 1, 2, 1, 10, 6, 3, 2, 2, 4, 1, 2, 6, 10, -1];
-        this.polys = [p0, p3, p3, p7, p1, p1, p2, p4, p5, p4, p2, p0, p1, p1, p2, p6];
-        this.divisors = [1, 1, 15, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 1];
-    }
-    
-    // Resets all internal state variables to their default values. Called when new register values are received to ensure clean state.
-    reset(){
+    // Resets all LFSR and counter state to power-on defaults
+    reset() {
         this.state = {
-            offset: 0,
-            count: 0,
-            last: 1,
-            f: 0,
-            rate: 0
+            p4:        0xF,    // 4-bit poly LFSR  (polynomial x^4 + x + 1,   period 15)
+            p5:        0x1F,   // 5-bit poly LFSR  (polynomial x^5 + x^2 + 1, period 31)
+            p9:        0x1FF,  // 9-bit poly LFSR  (polynomial x^9 + x^4 + 1, period 511)
+            tone:      1,      // Pure-tone flip-flop
+            div3:      3,      // ÷3 counter used by AUDC modes 14 and 15
+            freqCount: 0,      // Frequency-divider counter (counts up to AUDF+1)
+            out:       1,      // Current audio output bit
         };
     }
 
+    // Clock the 4-bit LFSR — polynomial x^4 + x + 1, taps at bits 1 and 0
+    clockP4() {
+        const b = ((this.state.p4 >> 1) ^ this.state.p4) & 1;
+        this.state.p4 = ((this.state.p4 >> 1) | (b << 3)) & 0xF;
+    }
 
-    // Main audio processing function that generates TIA sound output
+    // Clock the 5-bit LFSR — polynomial x^5 + x^2 + 1, taps at bits 2 and 0
+    clockP5() {
+        const b = ((this.state.p5 >> 2) ^ this.state.p5) & 1;
+        this.state.p5 = ((this.state.p5 >> 1) | (b << 4)) & 0x1F;
+    }
+
+    // Clock the 9-bit LFSR — polynomial x^9 + x^4 + 1, taps at bits 4 and 0
+    clockP9() {
+        const b = ((this.state.p9 >> 4) ^ this.state.p9) & 1;
+        this.state.p9 = ((this.state.p9 >> 1) | (b << 8)) & 0x1FF;
+    }
+
+    // Main audio processing function — generates TIA sound output sample by sample
     process(input, outputs, parameters) {
 
         // Get first output channel
         const output = outputs[0];
-        
-        // Track sample rate conversion
+
+        // Sample-rate conversion accumulator
         let rate = 0;
         let bufferIndex = 0;
 
-        // Calculate frequency divisor based on current control and frequency registers
-        const divisor = this.divisors[this.AUDC] * (this.AUDF + 1);
-        
-        // Convert 4-bit volume (0-15) to float (0-0.5)
+        // Frequency divisor: the sound generator advances once every AUDF+1 TIA clock ticks
+        const freqDiv = this.AUDF + 1;
+
+        // Convert 4-bit volume (0-15) to float amplitude (0–0.5)
         const volume = this.AUDV / 30;
 
-        // Process audio samples
         while (bufferIndex < this.buffer.length) {
-            // Increment frequency counter
-            this.state.f += 1;
 
-            // When divisor is reached, process next polynomial value
-            if (this.state.f === divisor) {
-                this.poly = this.polys[this.AUDC];
-                this.state.f = 0;
-                this.state.count += 1;
+            // Advance TIA frequency counter by one TIA clock tick
+            this.state.freqCount++;
 
-                // Check if we've reached end of current polynomial segment
-                if (this.state.count === this.poly[this.state.offset]) {
-                    this.state.offset += 1;
-                    this.state.count = 0;
-                    // Loop back to start if we hit end marker (-1)
-                    if (this.poly[this.state.offset] === -1) {
-                        this.state.offset = 0;
-                    }
+            // When the frequency divider fires, advance the sound generator
+            if (this.state.freqCount === freqDiv) {
+                this.state.freqCount = 0;
+
+                switch (this.AUDC) {
+
+                    // SET (DC high / silence)
+                    case 0:
+                    case 11:
+                        this.state.out = 1;
+                        break;
+
+                    // 4-bit poly
+                    case 1:
+                        this.clockP4();
+                        this.state.out = this.state.p4 & 1;
+                        break;
+
+                    // 5-bit poly gating 4-bit poly
+                    case 2:
+                    case 3:
+                        this.clockP5();
+                        if (this.state.p5 & 1) this.clockP4();
+                        this.state.out = this.state.p4 & 1;
+                        break;
+
+                    // Pure tone (toggle flip-flop)
+                    case 4:
+                    case 5:
+                    case 12:
+                    case 13:
+                        this.state.tone ^= 1;
+                        this.state.out = this.state.tone;
+                        break;
+
+                    // 5-bit poly gating pure tone
+                    case 6:
+                        this.clockP5();
+                        if (this.state.p5 & 1) this.state.tone ^= 1;
+                        this.state.out = this.state.tone;
+                        break;
+
+                    // 5-bit poly
+                    case 7:
+                    case 9:
+                        this.clockP5();
+                        this.state.out = this.state.p5 & 1;
+                        break;
+
+                    // 9-bit poly (white noise)
+                    case 8:
+                        this.clockP9();
+                        this.state.out = this.state.p9 & 1;
+                        break;
+
+                    // 5-bit poly gating 9-bit poly
+                    case 10:
+                        this.clockP5();
+                        if (this.state.p5 & 1) this.clockP9();
+                        this.state.out = this.state.p9 & 1;
+                        break;
+
+                    // Pure tone with ÷3 pre-divider (effective period = 6 × (AUDF+1))
+                    case 14:
+                        if (--this.state.div3 === 0) {
+                            this.state.div3 = 3;
+                            this.state.tone ^= 1;
+                        }
+                        this.state.out = this.state.tone;
+                        break;
+
+                    // 5-bit poly with ÷3 pre-divider (sequence period = 93 × (AUDF+1))
+                    case 15:
+                        if (--this.state.div3 === 0) {
+                            this.state.div3 = 3;
+                            this.clockP5();
+                        }
+                        this.state.out = this.state.p5 & 1;
+                        break;
                 }
-
-                // Generate output level (0 or 1) based on polynomial position
-                this.state.last = (this.state.offset % 2 === 0) ? 1 : 0;
             }
 
-            // Handle sample rate conversion from TIA to output rate
+            // Sample-rate conversion: map TIA clock ticks → output samples
             rate += this.SAMPLE_RATE;
             while (rate >= this.TIA_SAMPLE_RATE) {
-
-                // Apply volume to output level
-                const s = this.state.last ? 1 : 0;
-                this.buffer[bufferIndex] = s * volume;
-                bufferIndex++;
+                this.buffer[bufferIndex++] = this.state.out * volume;
                 rate -= this.TIA_SAMPLE_RATE;
-
             }
         }
 
-        // Copy buffer to output and continue processing
+        // Copy filled buffer to the output channel and keep the worklet alive
         output[0].set(this.buffer);
         return true;
     }

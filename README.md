@@ -47,6 +47,40 @@ The output of the TIA chip is directly tied to its volume and waveform generatio
 5. Timing and Counters:
 TIA chip uses counters to keep track of the timing of each sound’s frequency. The sample rate is a crucial aspect of this: for the chip to function properly and generate sound in sync with the rest of the system, it uses internal counters to track how frequently waveforms should be generated, and these counters are reset or modified based on the data written to the frequency registers.
 
+## LFSR Implementation
+
+`TIASoundProcessor.js` emulates the hardware using real **Linear Feedback Shift Registers (LFSRs)** — the same mechanism used inside the actual TIA silicon. Three independent LFSRs run in hardware:
+
+| Register | Polynomial      | Period |
+|----------|-----------------|--------|
+| Poly4    | x⁴ + x + 1      | 15     |
+| Poly5    | x⁵ + x² + 1     | 31     |
+| Poly9    | x⁹ + x⁴ + 1     | 511    |
+
+All three use **Fibonacci form** (shift right, feedback inserted at MSB). The feedback bit is the XOR of the two tapped bit positions.
+
+Each AUDC mode selects which LFSR(s) are active and how they are combined. The table below maps every AUDC value to its hardware behaviour. One "tick" occurs every **AUDF + 1** TIA audio clock cycles (the TIA audio clock runs at ~31 440 Hz for NTSC).
+
+| AUDC | Name         | Behaviour per tick |
+|------|--------------|--------------------|
+| 0    | SET          | Output = 1 (silence / DC) |
+| 1    | POLY4        | Clock poly4; output = poly4 LSB |
+| 2    | POLY5→POLY4  | Clock poly5; clock poly4 only when poly5 LSB = 1; output = poly4 LSB |
+| 3    | POLY5→POLY4  | Same as mode 2 |
+| 4    | TONE         | Toggle tone flip-flop; output = flip-flop |
+| 5    | TONE         | Same as mode 4 |
+| 6    | POLY5→TONE   | Clock poly5; toggle tone only when poly5 LSB = 1; output = flip-flop |
+| 7    | POLY5        | Clock poly5; output = poly5 LSB |
+| 8    | POLY9        | Clock poly9; output = poly9 LSB (white noise) |
+| 9    | POLY5        | Same as mode 7 |
+| 10   | POLY5→POLY9  | Clock poly5; clock poly9 only when poly5 LSB = 1; output = poly9 LSB |
+| 11   | SET          | Output = 1 (silence / DC) |
+| 12   | TONE         | Same as mode 4 |
+| 13   | TONE         | Same as mode 5 |
+| 14   | TONE ÷3      | Extra ÷3 pre-divider, then toggle tone; effective period = 6×(AUDF+1) |
+| 15   | POLY5 ÷3     | Extra ÷3 pre-divider, then clock poly5; sequence period = 93×(AUDF+1) |
+
+
 ## Installation
 
 ```html
