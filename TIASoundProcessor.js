@@ -79,9 +79,6 @@ class TIASoundProcessor extends AudioWorkletProcessor {
         // Persistent sample-rate conversion accumulator (carries fractional phase across blocks)
         this.rateAcc = 0;
 
-        // Audio output buffer
-        this.buffer = new Float32Array(128);
-
         // Handle incoming messages to update sound registers or configuration
         this.port.onmessage = (event) => {
             const data = event.data;
@@ -146,8 +143,9 @@ class TIASoundProcessor extends AudioWorkletProcessor {
     // Main audio processing function — generates TIA sound output sample by sample
     process(input, outputs, parameters) {
 
-        // Get first output channel
-        const output = outputs[0];
+        // Write directly into the output buffer provided by the AudioWorklet (no intermediate copy)
+        const outputChannel = outputs[0][0];
+        const bufferLength = outputChannel.length;
 
         let bufferIndex = 0;
 
@@ -157,7 +155,7 @@ class TIASoundProcessor extends AudioWorkletProcessor {
         // Convert 4-bit volume (0-15) to float amplitude (0–0.5)
         const volume = this.AUDV / 30;
 
-        while (bufferIndex < this.buffer.length) {
+        while (bufferIndex < bufferLength) {
 
             // Advance TIA frequency counter by one TIA clock tick
             this.state.freqCount++;
@@ -246,15 +244,15 @@ class TIASoundProcessor extends AudioWorkletProcessor {
 
             // Sample-rate conversion: map TIA clock ticks → output samples.
             // rateAcc persists across process() calls to avoid phase jitter.
+            // The guard (bufferIndex < bufferLength) prevents writing past the buffer end
+            // when the ratio SAMPLE_RATE/TIA_CLOCK causes a tick to emit 2 samples.
             this.rateAcc += this.SAMPLE_RATE;
-            while (this.rateAcc >= this.TIA_CLOCK) {
-                this.buffer[bufferIndex++] = this.state.out * volume;
+            while (this.rateAcc >= this.TIA_CLOCK && bufferIndex < bufferLength) {
+                outputChannel[bufferIndex++] = this.state.out * volume;
                 this.rateAcc -= this.TIA_CLOCK;
             }
         }
 
-        // Copy filled buffer to the output channel and keep the worklet alive
-        output[0].set(this.buffer);
         return true;
     }
 }

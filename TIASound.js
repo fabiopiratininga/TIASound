@@ -101,7 +101,6 @@ class TIASound {
      * @param {number} AUDV - Volume (0-15)
      */
     setChannel(C, AUDF, AUDC, AUDV){
-        AUDF = this.id(AUDF);  // numeric pass-through; allows future named frequency aliases
         AUDC = this.id(AUDC);  // resolves named types ('square', 'noise', …) to AUDC numbers
         this[`soundNode${C}`].port.postMessage({ AUDV, AUDC, AUDF });
     }
