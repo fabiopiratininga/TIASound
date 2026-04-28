@@ -6,6 +6,8 @@ A JavaScript library that emulates the sound capabilities of the Atari 2600's TI
 
 - Emulation of TIA sound chip waveforms
 - Support for all original TIA sound types
+- Hardware-accurate LFSR (Linear Feedback Shift Register) implementation
+- NTSC and PAL system support
 - Web Audio API implementation
 
 ## TIA
@@ -59,7 +61,11 @@ TIA chip uses counters to keep track of the timing of each sound’s frequency. 
 
 All three use **Fibonacci form** (shift right, feedback inserted at MSB). The feedback bit is the XOR of the two tapped bit positions.
 
-Each AUDC mode selects which LFSR(s) are active and how they are combined. The table below maps every AUDC value to its hardware behavior. One "tick" occurs every **AUDF + 1** TIA audio clock cycles (the TIA audio clock runs at ~31 440 Hz for NTSC).
+Each AUDC mode selects which LFSR(s) are active and how they are combined. The table below maps every AUDC value to its hardware behavior. One "tick" occurs every **AUDF + 1** TIA audio clock cycles.
+
+The TIA audio clock runs at:
+- **NTSC**: 3.579545 MHz / 114 ≈ **31400 Hz**
+- **PAL**: 3.546894 MHz / 114 ≈ **31112 Hz**
 
 | AUDC | Name         | Behavior per tick |
 |------|--------------|--------------------|
@@ -94,25 +100,35 @@ Each AUDC mode selects which LFSR(s) are active and how they are combined. The t
 The TIA chip (and this emulator) features two audio channels that play continuously once started. Unlike modern audio APIs, sounds don't have a defined duration - they keep playing until modified.
 Each channel can only play one sound at a time.
 Changing parameters instantly affects the ongoing sound.
-Set volume to 0 to silence a channel.
+Call `stop()` or set volume to 0 to silence a channel.
 
 ## Quick Start
 
 ```javascript
 
+// NTSC (default) — use new TIASound('PAL') for PAL systems
 const tia = new TIASound();
+
+// init() must be called inside a user-gesture handler (click, keydown, etc.)
+// An optional path to TIASoundProcessor.js can be passed: tia.init('/path/to/TIASoundProcessor.js')
 await tia.init();
 
-// Play a sound on channel 0
-tia.play(15, 'square', 8);  // frequency, type, volume
+// Play a sound on channel 0: play(frequency, type, volume)
+tia.play(15, 'square', 8);
 
-// Configure individual channels
+// Configure individual channels: setChannel0/1(frequency, type, volume)
 tia.setChannel0(12, 'noise', 8);
 tia.setChannel1(8, 'bass', 6);
 
 // Numeric control examples
 tia.setChannel0(31, 3, 12);
-tia.setChannel1(8, 12, 6); 
+tia.setChannel1(8, 12, 6);
+
+// Silence channel 0
+tia.stop(0);
+
+// Silence both channels
+tia.stop();
 
 ```
 

@@ -1,6 +1,6 @@
 
 /*!
- * TIASoundProcessor 2.0
+ * TIASoundProcessor 2.1
  * Audio processor that emulates the Atari 2600's TIA sound chip.
  * Implements the core sound generation logic using real LFSR (Linear Feedback
  * Shift Register) models identical to the Atari 2600 TIA hardware, replacing
@@ -29,6 +29,11 @@
  *  13  TONE       — same as mode 5
  *  14  TONE ÷3    — extra ÷3 pre-divider, then toggle tone; output = flip-flop
  *  15  POLY5 ÷3   — extra ÷3 pre-divider, then clock poly5; output = poly5 LSB
+ *
+ * Configuration message (sent once after node creation):
+ *   { type: 'config', system: 'NTSC' | 'PAL' }
+ *     NTSC TIA clock: 3.579545 MHz / 114 ≈ 31400 Hz
+ *     PAL  TIA clock: 3.546894 MHz / 114 ≈ 31112 Hz
  *
  * MIT License
  *
@@ -61,7 +66,7 @@ class TIASoundProcessor extends AudioWorkletProcessor {
 
         // Sample rates
         this.SAMPLE_RATE = (typeof sampleRate !== 'undefined') ? sampleRate : 48000;  // Output sample rate (AudioWorklet global)
-        this.TIA_SAMPLE_RATE = 31440;      // TIA chip native audio clock (NTSC: 3.579545 MHz / 114)
+        this.TIA_CLOCK = 31400;            // TIA chip native audio clock — NTSC default (3.579545 MHz / 114)
 
         // Initialize LFSR state
         this.reset();
@@ -71,20 +76,34 @@ class TIASoundProcessor extends AudioWorkletProcessor {
         this.AUDC = 0;  // Control (0-15)
         this.AUDF = 0;  // Frequency divisor (0-31)
 
+        // Persistent sample-rate conversion accumulator (carries fractional phase across blocks)
+        this.rateAcc = 0;
+
         // Audio output buffer
         this.buffer = new Float32Array(128);
 
-        // Handle incoming messages to update sound registers
+        // Handle incoming messages to update sound registers or configuration
         this.port.onmessage = (event) => {
-            // Reset internal state on every register update
-            this.reset();
-            const { AUDV, AUDC, AUDF } = event.data;
-            // Update volume register (0-15)
+            const data = event.data;
+
+            // Configuration message — set system clock (NTSC / PAL)
+            if (data.type === 'config') {
+                this.TIA_CLOCK = (data.system === 'PAL') ? 31112 : 31400;
+                return;
+            }
+
+            const { AUDV, AUDC, AUDF } = data;
+
+            // Update volume and frequency registers freely (no state reset needed)
             this.AUDV = this.clamp(AUDV, 0, 15);
-            // Update control register (0-15)
-            this.AUDC = this.clamp(AUDC, 0, 15);
-            // Update frequency register (0-31)
             this.AUDF = this.clamp(AUDF, 0, 31);
+
+            // Update control register; reset LFSR state only when the sound mode changes
+            const nextAUDC = this.clamp(AUDC, 0, 15);
+            if (nextAUDC !== this.AUDC) {
+                this.AUDC = nextAUDC;
+                this.reset();
+            }
         };
     }
 
@@ -130,8 +149,6 @@ class TIASoundProcessor extends AudioWorkletProcessor {
         // Get first output channel
         const output = outputs[0];
 
-        // Sample-rate conversion accumulator
-        let rate = 0;
         let bufferIndex = 0;
 
         // Frequency divisor: the sound generator advances once every AUDF+1 TIA clock ticks
@@ -227,11 +244,12 @@ class TIASoundProcessor extends AudioWorkletProcessor {
                 }
             }
 
-            // Sample-rate conversion: map TIA clock ticks → output samples
-            rate += this.SAMPLE_RATE;
-            while (rate >= this.TIA_SAMPLE_RATE) {
+            // Sample-rate conversion: map TIA clock ticks → output samples.
+            // rateAcc persists across process() calls to avoid phase jitter.
+            this.rateAcc += this.SAMPLE_RATE;
+            while (this.rateAcc >= this.TIA_CLOCK) {
                 this.buffer[bufferIndex++] = this.state.out * volume;
-                rate -= this.TIA_SAMPLE_RATE;
+                this.rateAcc -= this.TIA_CLOCK;
             }
         }
 
