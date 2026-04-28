@@ -28,6 +28,9 @@
 
 class TIASound {
 
+    // Named sound type → AUDC number map (static so it is allocated once, not per id() call)
+    static #SOUNDS = { saw: 1, engine: 3, square: 4, bass: 6, pitfall: 7, noise: 8, lead: 12, buzz: 15 };
+
     /**
      * @param {string} [system='NTSC'] - TV system: 'NTSC' (default) or 'PAL'
      */
@@ -71,26 +74,9 @@ class TIASound {
      * @returns {number} Numeric AUDC value
      */
     id(s) {
-
-        // Map of named sound types to their numeric values
-        const sounds = {
-            saw: 1,
-            engine: 3,
-            square: 4,
-            bass: 6,
-            pitfall: 7,
-            noise: 8,
-            lead: 12,
-            buzz: 15
-        };
-        
-        if (typeof s === 'number') {
-            return s;
-        } else if (typeof s === 'string') {
-            return sounds[s.toLowerCase()] || 0;
-        } else {
-            return 0;
-        }
+        if (typeof s === 'number') return s;
+        if (typeof s === 'string') return TIASound.#SOUNDS[s.toLowerCase()] || 0;
+        return 0;
     }
 
     /**
