@@ -60,7 +60,7 @@ class TIASoundProcessor extends AudioWorkletProcessor {
         super();
 
         // Sample rates
-        this.SAMPLE_RATE = sampleRate;     // Output sample rate (AudioWorklet global)
+        this.SAMPLE_RATE = (typeof sampleRate !== 'undefined') ? sampleRate : 48000;  // Output sample rate (AudioWorklet global)
         this.TIA_SAMPLE_RATE = 31440;      // TIA chip native audio clock (NTSC: 3.579545 MHz / 114)
 
         // Initialize LFSR state

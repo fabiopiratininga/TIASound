@@ -59,9 +59,9 @@ TIA chip uses counters to keep track of the timing of each sound’s frequency. 
 
 All three use **Fibonacci form** (shift right, feedback inserted at MSB). The feedback bit is the XOR of the two tapped bit positions.
 
-Each AUDC mode selects which LFSR(s) are active and how they are combined. The table below maps every AUDC value to its hardware behaviour. One "tick" occurs every **AUDF + 1** TIA audio clock cycles (the TIA audio clock runs at ~31 440 Hz for NTSC).
+Each AUDC mode selects which LFSR(s) are active and how they are combined. The table below maps every AUDC value to its hardware behavior. One "tick" occurs every **AUDF + 1** TIA audio clock cycles (the TIA audio clock runs at ~31 440 Hz for NTSC).
 
-| AUDC | Name         | Behaviour per tick |
+| AUDC | Name         | Behavior per tick |
 |------|--------------|--------------------|
 | 0    | SET          | Output = 1 (silence / DC) |
 | 1    | POLY4        | Clock poly4; output = poly4 LSB |
