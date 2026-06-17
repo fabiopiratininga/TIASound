@@ -6,6 +6,8 @@ A JavaScript library that emulates the sound capabilities of the Atari 2600's TI
 
 - Emulation of TIA sound chip waveforms
 - Support for all original TIA sound types
+- Hardware-accurate LFSR (Linear Feedback Shift Register) implementation
+- NTSC and PAL system support
 - Web Audio API implementation
 
 ## TIA
@@ -47,6 +49,44 @@ The output of the TIA chip is directly tied to its volume and waveform generatio
 5. Timing and Counters:
 TIA chip uses counters to keep track of the timing of each sound’s frequency. The sample rate is a crucial aspect of this: for the chip to function properly and generate sound in sync with the rest of the system, it uses internal counters to track how frequently waveforms should be generated, and these counters are reset or modified based on the data written to the frequency registers.
 
+## LFSR Implementation
+
+`TIASoundProcessor.js` emulates the hardware using real **Linear Feedback Shift Registers (LFSRs)** — the same mechanism used inside the actual TIA silicon. Three independent LFSRs run in hardware:
+
+| Register | Polynomial      | Period |
+|----------|-----------------|--------|
+| Poly4    | x⁴ + x + 1      | 15     |
+| Poly5    | x⁵ + x² + 1     | 31     |
+| Poly9    | x⁹ + x⁴ + 1     | 511    |
+
+All three use **Fibonacci form** (shift right, feedback inserted at MSB). The feedback bit is the XOR of the two tapped bit positions.
+
+Each AUDC mode selects which LFSR(s) are active and how they are combined. The table below maps every AUDC value to its hardware behavior. One "tick" occurs every **AUDF + 1** TIA audio clock cycles.
+
+The TIA audio clock runs at:
+- **NTSC**: 3.579545 MHz / 114 ≈ **31400 Hz**
+- **PAL**: 3.546894 MHz / 114 ≈ **31112 Hz**
+
+| AUDC | Name         | Behavior per tick |
+|------|--------------|--------------------|
+| 0    | SET          | Output = 1 (silence / DC) |
+| 1    | POLY4        | Clock poly4; output = poly4 LSB |
+| 2    | POLY5→POLY4  | Clock poly5; clock poly4 only when poly5 LSB = 1; output = poly4 LSB |
+| 3    | POLY5→POLY4  | Same as mode 2 |
+| 4    | TONE         | Toggle tone flip-flop; output = flip-flop |
+| 5    | TONE         | Same as mode 4 |
+| 6    | POLY5→TONE   | Clock poly5; toggle tone only when poly5 LSB = 1; output = flip-flop |
+| 7    | POLY5        | Clock poly5; output = poly5 LSB |
+| 8    | POLY9        | Clock poly9; output = poly9 LSB (white noise) |
+| 9    | POLY5        | Same as mode 7 |
+| 10   | POLY5→POLY9  | Clock poly5; clock poly9 only when poly5 LSB = 1; output = poly9 LSB |
+| 11   | SET          | Output = 1 (silence / DC) |
+| 12   | TONE         | Same as mode 4 |
+| 13   | TONE         | Same as mode 5 |
+| 14   | TONE ÷3      | Extra ÷3 pre-divider, then toggle tone; effective period = 6×(AUDF+1) |
+| 15   | POLY5 ÷3     | Extra ÷3 pre-divider, then clock poly5; sequence period = 93×(AUDF+1) |
+
+
 ## Installation
 
 ```html
@@ -60,25 +100,35 @@ TIA chip uses counters to keep track of the timing of each sound’s frequency. 
 The TIA chip (and this emulator) features two audio channels that play continuously once started. Unlike modern audio APIs, sounds don't have a defined duration - they keep playing until modified.
 Each channel can only play one sound at a time.
 Changing parameters instantly affects the ongoing sound.
-Set volume to 0 to silence a channel.
+Call `stop()` or set volume to 0 to silence a channel.
 
 ## Quick Start
 
 ```javascript
 
+// NTSC (default) — use new TIASound('PAL') for PAL systems
 const tia = new TIASound();
+
+// init() must be called inside a user-gesture handler (click, keydown, etc.)
+// An optional path to TIASoundProcessor.js can be passed: tia.init('/path/to/TIASoundProcessor.js')
 await tia.init();
 
-// Play a sound on channel 0
-tia.play(15, 'square', 8);  // frequency, type, volume
+// Play a sound on channel 0: play(frequency, type, volume)
+tia.play(15, 'square', 8);
 
-// Configure individual channels
+// Configure individual channels: setChannel0/1(frequency, type, volume)
 tia.setChannel0(12, 'noise', 8);
 tia.setChannel1(8, 'bass', 6);
 
 // Numeric control examples
 tia.setChannel0(31, 3, 12);
-tia.setChannel1(8, 12, 6); 
+tia.setChannel1(8, 12, 6);
+
+// Silence channel 0
+tia.stop(0);
+
+// Silence both channels
+tia.stop();
 
 ```
 

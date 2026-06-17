@@ -1,24 +1,54 @@
 
 /*!
- * TIASoundProcessor 1.0
+ * TIASoundProcessor 2.2
  * Audio processor that emulates the Atari 2600's TIA sound chip.
- * Implements the core sound generation logic for producing authentic Atari-style audio waveforms.
+ * Implements the core sound generation logic using real LFSR (Linear Feedback
+ * Shift Register) models identical to the Atari 2600 TIA hardware, replacing
+ * the previous pre-computed run-length-encoded polynomial approximation.
  * https://github.com/fabiopiratininga/TIASound
- * 
+ *
+ * LFSR polynomials (Fibonacci form, right-shift, feedback inserted at MSB):
+ *   Poly4 — x^4 + x + 1,      taps at bits 1 and 0, period 15
+ *   Poly5 — x^5 + x^2 + 1,    taps at bits 2 and 0, period 31
+ *   Poly9 — x^9 + x^4 + 1,    taps at bits 4 and 0, period 511
+ *
+ * AUDC mode map (each tick = one AUDF+1 TIA-clock period):
+ *   0  SET        — output held at 1 (DC / silence)
+ *   1  POLY4      — clock poly4; output = poly4 LSB
+ *   2  POLY5→4    — clock poly5; clock poly4 only when poly5 LSB = 1; output = poly4 LSB
+ *   3  POLY5→4    — same as mode 2
+ *   4  TONE       — toggle tone flip-flop; output = flip-flop
+ *   5  TONE       — same as mode 4
+ *   6  POLY5→TONE — clock poly5; toggle tone only when poly5 LSB = 1; output = flip-flop
+ *   7  POLY5      — clock poly5; output = poly5 LSB
+ *   8  POLY9      — clock poly9; output = poly9 LSB  (white noise)
+ *   9  POLY5      — same as mode 7
+ *  10  POLY5→9    — clock poly5; clock poly9 only when poly5 LSB = 1; output = poly9 LSB
+ *  11  SET        — output held at 1 (DC / silence)
+ *  12  TONE       — same as mode 4
+ *  13  TONE       — same as mode 5
+ *  14  TONE ÷3    — extra ÷3 pre-divider, then toggle tone; output = flip-flop
+ *  15  POLY5 ÷3   — extra ÷3 pre-divider, then clock poly5; output = poly5 LSB
+ *
+ * Configuration message (sent once after node creation):
+ *   { type: 'config', system: 'NTSC' | 'PAL' }
+ *     NTSC TIA clock: 3.579545 MHz / 114 ≈ 31400 Hz
+ *     PAL  TIA clock: 3.546894 MHz / 114 ≈ 31112 Hz
+ *
  * MIT License
- * 
+ *
  * Copyright (c) 2025 Fabio Cardoso
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -29,41 +59,49 @@
  */
 
 class TIASoundProcessor extends AudioWorkletProcessor {
-    
-    //Initializes audio parameters and sets up message handling
-    constructor(){
+
+    // Initializes audio parameters and sets up message handling
+    constructor() {
         super();
 
         // Sample rates
-        this.SAMPLE_RATE = 48000;      // Output sample rate
-        this.TIA_SAMPLE_RATE = 31440;  // TIA chip native rate
-        
-        // Initialize state and polynomials
-        this.reset();
-        this.setPoly();
-        
+        this.SAMPLE_RATE = (typeof sampleRate !== 'undefined') ? sampleRate : 48000;  // Output sample rate (AudioWorklet global)
+        this.TIA_CLOCK = 31400;            // TIA chip native audio clock — NTSC default (3.579545 MHz / 114)
+
         // TIA sound registers
-        this.AUDV = 0;  // Volume (0-15)
-        this.AUDC = 0;  // Control (0-15) 
-        this.AUDF = 0;  // Frequency (0-31)
-        
-        // Audio output buffer
-        this.buffer = new Float32Array(128);
+        this.AUDV = 0;  // Volume  (0-15)
+        this.AUDC = 0;  // Control (0-15)
+        this.AUDF = 0;  // Frequency divisor (0-31)
 
-        // Handle incoming messages to update sound registers
+        // Persistent sample-rate conversion accumulator (carries fractional phase across blocks)
+        this.rateAcc = 0;
+
+        // LFSR / counter state — stored as flat properties to avoid double-dereference in process()
+        this.reset();
+
+        // Handle incoming messages to update sound registers or configuration
         this.port.onmessage = (event) => {
-            // Reset internal state
-            this.reset();
-            // Destructure the received register values
-            const { AUDV, AUDC, AUDF } = event.data;
-            // Update volume register (0-15)
-            this.AUDV = this.clamp(AUDV, 0, 15);
-            // Update control register (0-15)
-            this.AUDC = this.clamp(AUDC, 0, 15); 
-            // Update frequency register (0-31)
-            this.AUDF = this.clamp(AUDF, 0, 31);
-        };
+            const data = event.data;
 
+            // Configuration message — set system clock (NTSC / PAL)
+            if (data.type === 'config') {
+                this.TIA_CLOCK = (data.system === 'PAL') ? 31112 : 31400;
+                return;
+            }
+
+            const { AUDV, AUDC, AUDF } = data;
+
+            // Update volume and frequency registers freely (no state reset needed)
+            this.AUDV = this.clamp(AUDV, 0, 15);
+            this.AUDF = this.clamp(AUDF, 0, 31);
+
+            // Update control register; reset LFSR state only when the sound mode changes
+            const nextAUDC = this.clamp(AUDC, 0, 15);
+            if (nextAUDC !== this.AUDC) {
+                this.AUDC = nextAUDC;
+                this.reset();
+            }
+        };
     }
 
     // Clamps a value between a minimum and maximum
@@ -71,89 +109,164 @@ class TIASoundProcessor extends AudioWorkletProcessor {
         return Math.min(Math.max(value, min), max);
     }
 
-
-    // Sets up polynomial sequences and frequency divisors for TIA sound generation
-    setPoly(){
-        const p0 = [1, -1];
-        const p1 = [1, 1, -1];
-        const p2 = [16, 15, -1];
-        const p3 = [1, 2, 2, 1, 1, 1, 4, 3, -1];
-        const p4 = [1, 2, 1, 1, 2, 2, 5, 4, 2, 1, 3, 1, 1, 1, 1, 4, -1];
-        const p5 = [1, 4, 1, 3, 2, 4, 1, 2, 3, 2, 1, 1, 1, 1, 1, 1, 2, 4, 2, 1, 4, 1, 1, 2, 2, 1, 3, 2, 1, 3, 1, 1, 1, 4, 1, 1, 1, 1, 2, 1, 1, 2, 6, 1, 2, 2, 1, 2, 1, 2, 1, 1, 2, 1, 6, 2, 1, 2, 2, 1, 1, 1, 1, 2, 2, 2, 2, 7, 2, 3, 2, 2, 1, 1, 1, 3, 2, 1, 1, 2, 1, 1, 7, 1, 1, 3, 1, 1, 2, 3, 3, 1, 1, 1, 2, 2, 1, 1, 2, 2, 4, 3, 5, 1, 3, 1, 1, 5, 2, 1, 1, 1, 2, 1, 2, 1, 3, 1, 2, 5, 1, 1, 2, 1, 1, 1, 5, 1, 1, 1, 1, 1, 1, 1, 1, 6, 1, 1, 1, 2, 1, 1, 1, 1, 4, 2, 1, 1, 3, 1, 3, 6, 3, 2, 3, 1, 1, 2, 1, 2, 4, 1, 1, 1, 3, 1, 1, 1, 1, 3, 1, 2, 1, 4, 2, 2, 3, 4, 1, 1, 4, 1, 2, 1, 2, 2, 2, 1, 1, 4, 3, 1, 4, 4, 9, 5, 4, 1, 5, 3, 1, 1, 3, 2, 2, 2, 1, 5, 1, 2, 1, 1, 1, 2, 3, 1, 2, 1, 1, 3, 4, 2, 5, 2, 2, 1, 2, 3, 1, 1, 1, 1, 1, 2, 1, 3, 3, 3, 2, 1, 2, 1, 1, 1, 1, 1, 3, 3, 1, 2, 2, 3, 1, 3, 1, 8, -1];
-        const p6 = [5, 6, 4, 5, 10, 5, 3, 7, 4, 10, 6, 3, 6, 4, 9, 6, -1];
-        const p7 = [2, 3, 2, 1, 4, 1, 6, 10, 2, 4, 2, 1, 1, 4, 5, 9, 3, 3, 4, 1, 1, 1, 8, 5, 5, 5, 4, 1, 1, 1, 8, 4, 2, 8, 3, 3, 1, 1, 7, 4, 2, 7, 5, 1, 3, 1, 7, 4, 1, 4, 8, 2, 1, 3, 4, 7, 1, 3, 7, 3, 2, 1, 6, 6, 2, 2, 4, 5, 3, 2, 6, 6, 1, 3, 3, 2, 5, 3, 7, 3, 4, 3, 2, 2, 2, 5, 9, 3, 1, 5, 3, 1, 2, 2, 11, 5, 1, 5, 3, 1, 1, 2, 12, 5, 1, 2, 5, 2, 1, 1, 12, 6, 1, 2, 5, 1, 2, 1, 10, 6, 3, 2, 2, 4, 1, 2, 6, 10, -1];
-        this.polys = [p0, p3, p3, p7, p1, p1, p2, p4, p5, p4, p2, p0, p1, p1, p2, p6];
-        this.divisors = [1, 1, 15, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 1];
-    }
-    
-    // Resets all internal state variables to their default values. Called when new register values are received to ensure clean state.
-    reset(){
-        this.state = {
-            offset: 0,
-            count: 0,
-            last: 1,
-            f: 0,
-            rate: 0
-        };
+    // Resets all LFSR and counter state to power-on defaults
+    reset() {
+        this.p4        = 0xF;    // 4-bit poly LFSR  (polynomial x^4 + x + 1,   period 15)
+        this.p5        = 0x1F;   // 5-bit poly LFSR  (polynomial x^5 + x^2 + 1, period 31)
+        this.p9        = 0x1FF;  // 9-bit poly LFSR  (polynomial x^9 + x^4 + 1, period 511)
+        this.tone      = 1;      // Pure-tone flip-flop
+        this.div3      = 3;      // ÷3 counter used by AUDC modes 14 and 15
+        this.freqCount = 0;      // Frequency-divider counter (counts up to AUDF+1)
+        this.out       = 1;      // Current audio output bit
     }
 
-
-    // Main audio processing function that generates TIA sound output
+    // Main audio processing function — generates TIA sound output sample by sample
     process(input, outputs, parameters) {
 
-        // Get first output channel
-        const output = outputs[0];
-        
-        // Track sample rate conversion
-        let rate = 0;
+        const outputChannel = outputs[0][0];
+        const bufferLength  = outputChannel.length;
+
+        // Hoist all instance fields to locals — a single property lookup per block
+        // instead of repeated this.* dereferences inside the hot loop.
+        const SR      = this.SAMPLE_RATE;
+        const TCLK    = this.TIA_CLOCK;
+        const freqDiv = this.AUDF + 1;    // sound generator fires once every freqDiv TIA ticks
+        const volume  = this.AUDV / 30;   // convert 4-bit volume (0-15) to float amplitude (0–0.5)
+        const audc    = this.AUDC;
+
+        let rateAcc   = this.rateAcc;
+        let freqCount = this.freqCount;
+        let out       = this.out;
+        let p4        = this.p4;
+        let p5        = this.p5;
+        let p9        = this.p9;
+        let tone      = this.tone;
+        let div3      = this.div3;
+
         let bufferIndex = 0;
 
-        // Calculate frequency divisor based on current control and frequency registers
-        const divisor = this.divisors[this.AUDC] * (this.AUDF + 1);
-        
-        // Convert 4-bit volume (0-15) to float (0-0.5)
-        const volume = this.AUDV / 30;
+        while (bufferIndex < bufferLength) {
 
-        // Process audio samples
-        while (bufferIndex < this.buffer.length) {
-            // Increment frequency counter
-            this.state.f += 1;
+            // Advance TIA frequency counter; use >= so a decrease in AUDF never stalls the divider
+            if (++freqCount >= freqDiv) {
+                freqCount = 0;
 
-            // When divisor is reached, process next polynomial value
-            if (this.state.f === divisor) {
-                this.poly = this.polys[this.AUDC];
-                this.state.f = 0;
-                this.state.count += 1;
+                // Advance the sound generator — LFSR steps inlined to avoid method-call overhead
+                switch (audc) {
 
-                // Check if we've reached end of current polynomial segment
-                if (this.state.count === this.poly[this.state.offset]) {
-                    this.state.offset += 1;
-                    this.state.count = 0;
-                    // Loop back to start if we hit end marker (-1)
-                    if (this.poly[this.state.offset] === -1) {
-                        this.state.offset = 0;
+                    // SET (DC high / silence)
+                    case 0:
+                    case 11:
+                        out = 1;
+                        break;
+
+                    // 4-bit poly
+                    case 1: {
+                        const fb = ((p4 >> 1) ^ p4) & 1;
+                        p4 = ((p4 >> 1) | (fb << 3)) & 0xF;
+                        out = p4 & 1;
+                        break;
                     }
-                }
 
-                // Generate output level (0 or 1) based on polynomial position
-                this.state.last = (this.state.offset % 2 === 0) ? 1 : 0;
+                    // 5-bit poly gating 4-bit poly
+                    case 2:
+                    case 3: {
+                        const fb5 = ((p5 >> 2) ^ p5) & 1;
+                        p5 = ((p5 >> 1) | (fb5 << 4)) & 0x1F;
+                        if (p5 & 1) {
+                            const fb4 = ((p4 >> 1) ^ p4) & 1;
+                            p4 = ((p4 >> 1) | (fb4 << 3)) & 0xF;
+                        }
+                        out = p4 & 1;
+                        break;
+                    }
+
+                    // Pure tone (toggle flip-flop)
+                    case 4:
+                    case 5:
+                    case 12:
+                    case 13:
+                        tone ^= 1;
+                        out = tone;
+                        break;
+
+                    // 5-bit poly gating pure tone
+                    case 6: {
+                        const fb5 = ((p5 >> 2) ^ p5) & 1;
+                        p5 = ((p5 >> 1) | (fb5 << 4)) & 0x1F;
+                        if (p5 & 1) tone ^= 1;
+                        out = tone;
+                        break;
+                    }
+
+                    // 5-bit poly
+                    case 7:
+                    case 9: {
+                        const fb5 = ((p5 >> 2) ^ p5) & 1;
+                        p5 = ((p5 >> 1) | (fb5 << 4)) & 0x1F;
+                        out = p5 & 1;
+                        break;
+                    }
+
+                    // 9-bit poly (white noise)
+                    case 8: {
+                        const fb9 = ((p9 >> 4) ^ p9) & 1;
+                        p9 = ((p9 >> 1) | (fb9 << 8)) & 0x1FF;
+                        out = p9 & 1;
+                        break;
+                    }
+
+                    // 5-bit poly gating 9-bit poly
+                    case 10: {
+                        const fb5 = ((p5 >> 2) ^ p5) & 1;
+                        p5 = ((p5 >> 1) | (fb5 << 4)) & 0x1F;
+                        if (p5 & 1) {
+                            const fb9 = ((p9 >> 4) ^ p9) & 1;
+                            p9 = ((p9 >> 1) | (fb9 << 8)) & 0x1FF;
+                        }
+                        out = p9 & 1;
+                        break;
+                    }
+
+                    // Pure tone with ÷3 pre-divider (effective period = 6 × (AUDF+1))
+                    case 14:
+                        if (--div3 === 0) { div3 = 3; tone ^= 1; }
+                        out = tone;
+                        break;
+
+                    // 5-bit poly with ÷3 pre-divider (sequence period = 93 × (AUDF+1))
+                    case 15:
+                        if (--div3 === 0) {
+                            div3 = 3;
+                            const fb5 = ((p5 >> 2) ^ p5) & 1;
+                            p5 = ((p5 >> 1) | (fb5 << 4)) & 0x1F;
+                        }
+                        out = p5 & 1;
+                        break;
+                }
             }
 
-            // Handle sample rate conversion from TIA to output rate
-            rate += this.SAMPLE_RATE;
-            while (rate >= this.TIA_SAMPLE_RATE) {
-
-                // Apply volume to output level
-                const s = this.state.last ? 1 : 0;
-                this.buffer[bufferIndex] = s * volume;
-                bufferIndex++;
-                rate -= this.TIA_SAMPLE_RATE;
-
+            // Sample-rate conversion: map TIA clock ticks → output samples.
+            // rateAcc persists across process() calls to avoid phase jitter.
+            // The guard (bufferIndex < bufferLength) prevents writing past the buffer end
+            // when the ratio SAMPLE_RATE/TIA_CLOCK causes a tick to emit 2 samples.
+            rateAcc += SR;
+            while (rateAcc >= TCLK && bufferIndex < bufferLength) {
+                outputChannel[bufferIndex++] = out * volume;
+                rateAcc -= TCLK;
             }
         }
 
-        // Copy buffer to output and continue processing
-        output[0].set(this.buffer);
+        // Write locals back to instance state for the next process() call
+        this.rateAcc   = rateAcc;
+        this.freqCount = freqCount;
+        this.out       = out;
+        this.p4        = p4;
+        this.p5        = p5;
+        this.p9        = p9;
+        this.tone      = tone;
+        this.div3      = div3;
+
         return true;
     }
 }
